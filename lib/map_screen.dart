@@ -1,13 +1,13 @@
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:latlong2/latlong.dart';
+import 'widgets/map_widget.dart';
+import 'widgets/address_input_widget.dart';
+import 'routing_service.dart';
+import 'models/route_data.dart';
+import 'radar_provider.dart';
 import 'package:geolocator/geolocator.dart';
 
-import 'widgets/address_input_widget.dart';
-import 'widgets/map_widget.dart';
-import 'models/route_data.dart';
-import 'routing_service.dart';
 import 'shelter_finder.dart';
 
 class MapScreen extends ConsumerStatefulWidget {
@@ -89,7 +89,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     ));
 
     try {
-      final route = await RoutingService.getRoute(
+      final routeResult = await RoutingService.getRoute(
         start: _routeData.start!,
         end: _routeData.end!,
         profile: _profile,
@@ -97,8 +97,10 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       final shelters = await ShelterFinder.findSheltersNear(_routeData.end!);
 
       _updateRouteData((data) => data.copyWith(
-        route: route,
+        route: routeResult.coordinates,
         shelters: shelters,
+        distanceInMeters: routeResult.distanceInMeters,
+        durationInSeconds: routeResult.durationInSeconds,
         isLoading: false,
       ));
     } catch (e) {
@@ -145,6 +147,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final mapCenter = _routeData.route.isNotEmpty 
         ? _routeData.route.first 
         : const LatLng(52.5200, 13.4050);
+    final radarVisible = ref.watch(radarOverlayProvider);
 
     return Scaffold(
       body: SafeArea(
@@ -191,7 +194,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         ],
                       ),
                       const SizedBox(height: 24),
-                      
+
                       // Address Inputs
                       AddressInputWidget(
                         label: 'Von',
@@ -216,7 +219,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         hasLocation: _routeData.end != null,
                       ),
                       const SizedBox(height: 24),
-                      
+
                       // Route Button & Radar Toggle
                       Row(
                         children: [
@@ -241,7 +244,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 ),
               ),
             ),
-            
+
             // Error Display
             if (_routeData.error != null)
               Container(
@@ -271,7 +274,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   ),
                 ),
               ),
-            
+
             // Map
             Expanded(
               child: Container(
@@ -290,7 +293,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 ),
               ),
             ),
-            
+
             // Bottom Info Card
             if (_routeData.route.isNotEmpty || _routeData.isLoading)
               Container(
@@ -320,7 +323,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                               Row(
                                 children: [
                                   Text(
-                                    '${(_routeData.route.length * 100 / 1000).toStringAsFixed(1)} km',
+                                    '${((_routeData.distanceInMeters ?? 0) / 1000).toStringAsFixed(1)} km',
                                     style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                                       color: Theme.of(context).colorScheme.primary,
                                     ),
@@ -361,7 +364,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                               ),
                               const SizedBox(height: 8),
                               Text(
-                                'Geschätzte Dauer: ${(_routeData.route.length * 0.75).round()} Min',
+                                'Geschätzte Dauer: ${((_routeData.durationInSeconds ?? 0) / 60).round()} Min',
                                 style: Theme.of(context).textTheme.bodyMedium,
                               ),
                             ],
@@ -371,6 +374,20 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               ),
           ],
         ),
+      ),
+    appBar: AppBar(
+        title: const Text('DryRoute'),
+        backgroundColor: Theme.of(context).colorScheme.primary,
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: Icon(radarVisible ? Icons.radar : Icons.radar_outlined),
+            onPressed: () {
+              ref.read(radarOverlayProvider.notifier).state = !radarVisible;
+            },
+            tooltip: radarVisible ? 'Radar ausblenden' : 'Radar einblenden',
+          ),
+        ],
       ),
     );
   }

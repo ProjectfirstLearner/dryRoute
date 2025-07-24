@@ -8,6 +8,8 @@ class RouteData {
   final List<LatLng> shelters;
   final bool isLoading;
   final String? error;
+  final double? distanceInMeters;
+  final double? durationInSeconds;
 
   const RouteData({
     this.start,
@@ -16,6 +18,8 @@ class RouteData {
     this.shelters = const [],
     this.isLoading = false,
     this.error,
+    this.distanceInMeters,
+    this.durationInSeconds,
   });
 
   RouteData copyWith({
@@ -25,6 +29,8 @@ class RouteData {
     List<LatLng>? shelters,
     bool? isLoading,
     String? error,
+    double? distanceInMeters,
+    double? durationInSeconds,
   }) {
     return RouteData(
       start: start ?? this.start,
@@ -33,6 +39,8 @@ class RouteData {
       shelters: shelters ?? this.shelters,
       isLoading: isLoading ?? this.isLoading,
       error: error ?? this.error,
+      distanceInMeters: distanceInMeters ?? this.distanceInMeters,
+      durationInSeconds: durationInSeconds ?? this.durationInSeconds,
     );
   }
 }

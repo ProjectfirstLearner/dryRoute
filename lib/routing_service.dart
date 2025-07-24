@@ -3,11 +3,23 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
+class RouteResult {
+  final List<LatLng> coordinates;
+  final double distanceInMeters;
+  final double durationInSeconds;
+
+  RouteResult({
+    required this.coordinates,
+    required this.distanceInMeters,
+    required this.durationInSeconds,
+  });
+}
+
 class RoutingService {
   static final String _apiKey = dotenv.env['ORS_API_KEY'] ?? '';
   static const String _baseUrl = 'https://api.openrouteservice.org/v2/directions';
 
-  static Future<List<LatLng>> getRoute({
+  static Future<RouteResult> getRoute({
     required LatLng start,
     required LatLng end,
     String profile = 'foot-walking',
@@ -41,10 +53,10 @@ class RoutingService {
     try {
       // ORS verwendet API-Key als Query-Parameter, nicht als Header
       final uriWithApiKey = Uri.parse('$_baseUrl/$profile?api_key=$_apiKey');
-      
+
       print('ORS Request URL: $uriWithApiKey');
       print('ORS Request Body: $body');
-      
+
       final response = await http.post(
         uriWithApiKey,
         headers: {
@@ -60,19 +72,19 @@ class RoutingService {
       if (response.statusCode != 200) {
         final errorData = jsonDecode(response.body);
         final errorMessage = errorData['error']?['message'] ?? 'Unbekannter Fehler';
-        
+
         // Falls foot-walking fehlschlägt, versuche driving-car als Fallback
         if (profile == 'foot-walking' && response.statusCode == 404) {
           print('Foot-walking fehlgeschlagen, versuche driving-car...');
           return getRoute(start: start, end: end, profile: 'driving-car');
         }
-        
+
         throw Exception('ORS-Fehler (${response.statusCode}): $errorMessage');
       }
 
       final data = jsonDecode(response.body);
       print('Parsed JSON data: $data');
-      
+
       // ORS gibt routes zurück, nicht features
       if (data['routes'] == null || (data['routes'] as List).isEmpty) {
         throw Exception('Keine Route gefunden zwischen den angegebenen Punkten');
@@ -85,12 +97,22 @@ class RoutingService {
 
       final geometryString = route['geometry'] as String;
       print('Geometry string: $geometryString');
-      
+
       // Dekodiere die Polyline-Geometrie
       final coords = _decodePolyline(geometryString);
       print('Decoded ${coords.length} coordinates');
-      
-      return coords;
+
+      // Extrahiere die echte Distanz aus der API-Response
+      final summary = route['summary'];
+      final distance = (summary?['distance'] as num?)?.toDouble() ?? 0.0;
+      final duration = (summary?['duration'] as num?)?.toDouble() ?? 0.0;
+      print('Route distance: ${distance}m, duration: ${duration}s');
+
+      return RouteResult(
+        coordinates: coords,
+        distanceInMeters: distance,
+        durationInSeconds: duration,
+      );
 
     } catch (e) {
       if (e is Exception) {
@@ -100,43 +122,33 @@ class RoutingService {
     }
   }
 
-  // Dekodiert eine Polyline-Geometrie String zu LatLng-Koordinaten
   static List<LatLng> _decodePolyline(String encoded) {
-    List<LatLng> points = [];
-    int index = 0;
-    int len = encoded.length;
-    int lat = 0;
-    int lng = 0;
+    List<LatLng> poly = [];
+    int index = 0, len = encoded.length;
+    int lat = 0, lng = 0;
 
     while (index < len) {
-      int b;
-      int shift = 0;
-      int result = 0;
-      
+      int b, shift = 0, result = 0;
       do {
         b = encoded.codeUnitAt(index++) - 63;
-        result |= (b & 0x1f) << shift;
+        result |= (b & 0x1F) << shift;
         shift += 5;
       } while (b >= 0x20);
-      
       int dlat = ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
       lat += dlat;
 
       shift = 0;
       result = 0;
-      
       do {
         b = encoded.codeUnitAt(index++) - 63;
-        result |= (b & 0x1f) << shift;
+        result |= (b & 0x1F) << shift;
         shift += 5;
       } while (b >= 0x20);
-      
       int dlng = ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
       lng += dlng;
 
-      points.add(LatLng(lat / 1E5, lng / 1E5));
+      poly.add(LatLng(lat / 1E5, lng / 1E5));
     }
-
-    return points;
+    return poly;
   }
 }
