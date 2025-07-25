@@ -1,7 +1,8 @@
 import 'dart:convert';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'models/route_data.dart';
 
 class RouteResult {
   final List<LatLng> coordinates;
@@ -18,6 +19,9 @@ class RouteResult {
 class RoutingService {
   static final String _apiKey = dotenv.env['ORS_API_KEY'] ?? '';
   static const String _baseUrl = 'https://api.openrouteservice.org/v2/directions';
+  static const String _osrmUrl = 'https://router.project-osrm.org/route/v1/driving';
+  
+  String get _mapboxToken => dotenv.env['MAPBOX_TOKEN'] ?? '';
 
   static Future<RouteResult> getRoute({
     required LatLng start,
@@ -40,10 +44,6 @@ class RoutingService {
       [end.longitude, end.latitude]
     ];
 
-    print('Start: ${start.latitude}, ${start.longitude}');
-    print('End: ${end.latitude}, ${end.longitude}');
-
-    final uri = Uri.parse('$_baseUrl/$profile');
     final body = jsonEncode({
       'coordinates': coordinates,
       'instructions': false,
@@ -54,9 +54,6 @@ class RoutingService {
       // ORS verwendet API-Key als Query-Parameter, nicht als Header
       final uriWithApiKey = Uri.parse('$_baseUrl/$profile?api_key=$_apiKey');
 
-      print('ORS Request URL: $uriWithApiKey');
-      print('ORS Request Body: $body');
-
       final response = await http.post(
         uriWithApiKey,
         headers: {
@@ -66,16 +63,12 @@ class RoutingService {
         body: body,
       );
 
-      print('ORS Response Status: ${response.statusCode}');
-      print('ORS Response Body: ${response.body}');
-
       if (response.statusCode != 200) {
         final errorData = jsonDecode(response.body);
         final errorMessage = errorData['error']?['message'] ?? 'Unbekannter Fehler';
 
         // Falls foot-walking fehlschlägt, versuche driving-car als Fallback
         if (profile == 'foot-walking' && response.statusCode == 404) {
-          print('Foot-walking fehlgeschlagen, versuche driving-car...');
           return getRoute(start: start, end: end, profile: 'driving-car');
         }
 
@@ -83,7 +76,6 @@ class RoutingService {
       }
 
       final data = jsonDecode(response.body);
-      print('Parsed JSON data: $data');
 
       // ORS gibt routes zurück, nicht features
       if (data['routes'] == null || (data['routes'] as List).isEmpty) {
@@ -96,17 +88,14 @@ class RoutingService {
       }
 
       final geometryString = route['geometry'] as String;
-      print('Geometry string: $geometryString');
 
       // Dekodiere die Polyline-Geometrie
       final coords = _decodePolyline(geometryString);
-      print('Decoded ${coords.length} coordinates');
 
       // Extrahiere die echte Distanz aus der API-Response
       final summary = route['summary'];
       final distance = (summary?['distance'] as num?)?.toDouble() ?? 0.0;
       final duration = (summary?['duration'] as num?)?.toDouble() ?? 0.0;
-      print('Route distance: ${distance}m, duration: ${duration}s');
 
       return RouteResult(
         coordinates: coords,
@@ -120,6 +109,164 @@ class RoutingService {
       }
       throw Exception('Netzwerkfehler: $e');
     }
+  }
+
+  /// Berechnet Route zwischen zwei Punkten
+  Future<RouteData?> calculateRoute(
+    LatLng start, 
+    LatLng end, 
+    {String startAddress = '', String endAddress = ''}
+  ) async {
+    try {
+      // Versuche zuerst OSRM (kostenlos)
+      final osrmRoute = await _calculateOSRMRoute(start, end, startAddress, endAddress);
+      if (osrmRoute != null) return osrmRoute;
+
+      // Fallback zu Mapbox falls verfügbar
+      if (_mapboxToken.isNotEmpty) {
+        return await _calculateMapboxRoute(start, end, startAddress, endAddress);
+      }
+
+      return null;
+    } catch (e) {
+      print('Fehler bei Routenberechnung: $e');
+      return null;
+    }
+  }
+
+  /// OSRM Routing (Open Source)
+  Future<RouteData?> _calculateOSRMRoute(
+    LatLng start, 
+    LatLng end, 
+    String startAddress, 
+    String endAddress
+  ) async {
+    try {
+      final url = Uri.parse(
+        '$_osrmUrl/${start.longitude},${start.latitude};${end.longitude},${end.latitude}'
+        '?overview=full&geometries=geojson&steps=true'
+      );
+
+      final response = await http.get(url).timeout(const Duration(seconds: 15));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        
+        if (data['routes'] != null && data['routes'].isNotEmpty) {
+          final route = data['routes'][0];
+          final geometry = route['geometry']['coordinates'] as List;
+          
+          final polylinePoints = geometry
+              .map((coord) => LatLng(coord[1].toDouble(), coord[0].toDouble()))
+              .toList();
+
+          final distance = (route['distance'] as num).toDouble();
+          final duration = Duration(seconds: (route['duration'] as num).round());
+
+          return RouteData(
+            polylinePoints: polylinePoints,
+            totalDistance: distance,
+            estimatedDuration: duration,
+            startAddress: startAddress.isEmpty ? 'Start' : startAddress,
+            endAddress: endAddress.isEmpty ? 'Ziel' : endAddress,
+            startPoint: start,
+            endPoint: end,
+            createdAt: DateTime.now(),
+          );
+        }
+      }
+    } catch (e) {
+      print('OSRM Fehler: $e');
+    }
+    return null;
+  }
+
+  /// Mapbox Routing (benötigt API Key)
+  Future<RouteData?> _calculateMapboxRoute(
+    LatLng start, 
+    LatLng end, 
+    String startAddress, 
+    String endAddress
+  ) async {
+    try {
+      final url = Uri.parse(
+        'https://api.mapbox.com/directions/v5/mapbox/cycling/'
+        '${start.longitude},${start.latitude};${end.longitude},${end.latitude}'
+        '?geometries=geojson&access_token=$_mapboxToken'
+      );
+
+      final response = await http.get(url).timeout(const Duration(seconds: 15));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        
+        if (data['routes'] != null && data['routes'].isNotEmpty) {
+          final route = data['routes'][0];
+          final geometry = route['geometry']['coordinates'] as List;
+          
+          final polylinePoints = geometry
+              .map((coord) => LatLng(coord[1].toDouble(), coord[0].toDouble()))
+              .toList();
+
+          final distance = (route['distance'] as num).toDouble();
+          final duration = Duration(seconds: (route['duration'] as num).round());
+
+          return RouteData(
+            polylinePoints: polylinePoints,
+            totalDistance: distance,
+            estimatedDuration: duration,
+            startAddress: startAddress.isEmpty ? 'Start' : startAddress,
+            endAddress: endAddress.isEmpty ? 'Ziel' : endAddress,
+            startPoint: start,
+            endPoint: end,
+            createdAt: DateTime.now(),
+          );
+        }
+      }
+    } catch (e) {
+      print('Mapbox Fehler: $e');
+    }
+    return null;
+  }
+
+  /// Erstellt eine einfache Luftlinie-Route als Fallback
+  RouteData createStraightLineRoute(
+    LatLng start, 
+    LatLng end, 
+    String startAddress, 
+    String endAddress
+  ) {
+    const Distance distance = Distance();
+    final distanceMeters = distance.as(LengthUnit.Meter, start, end);
+    
+    // Geschätzte Dauer bei 15 km/h (Fahrrad)
+    final estimatedMinutes = (distanceMeters / 1000 * 4).round(); // 15 km/h = 4 min/km
+    
+    return RouteData(
+      polylinePoints: [start, end],
+      totalDistance: distanceMeters,
+      estimatedDuration: Duration(minutes: estimatedMinutes),
+      startAddress: startAddress.isEmpty ? 'Start' : startAddress,
+      endAddress: endAddress.isEmpty ? 'Ziel' : endAddress,
+      startPoint: start,
+      endPoint: end,
+      createdAt: DateTime.now(),
+    );
+  }
+
+  /// Berechnet Zwischenpunkte für lange Strecken
+  List<LatLng> interpolateRoute(LatLng start, LatLng end, {int points = 10}) {
+    final List<LatLng> interpolated = [start];
+    
+    for (int i = 1; i < points; i++) {
+      final ratio = i / points;
+      final lat = start.latitude + (end.latitude - start.latitude) * ratio;
+      final lng = start.longitude + (end.longitude - start.longitude) * ratio;
+      interpolated.add(LatLng(lat, lng));
+    }
+    
+    interpolated.add(end);
+    return interpolated;
   }
 
   static List<LatLng> _decodePolyline(String encoded) {

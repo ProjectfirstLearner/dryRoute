@@ -1,51 +1,93 @@
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
-/// Radar-Provider-Auswahl und Overlay-Steuerung
-final radarOverlayProvider = StateProvider<bool>((ref) => true);
-final radarTimestampProvider = StateProvider<String>((ref) => '');
+enum RadarSource { rainviewer, dwd, openweathermap }
 
-/// Provider für aktuelle Radar-Zeitstempel von RainViewer
-final radarTimestampsProvider = FutureProvider<List<String>>((ref) async {
-  try {
-    final response = await http.get(
-      Uri.parse('https://api.rainviewer.com/public/weather-maps.json'),
+class RadarState {
+  final bool isVisible;
+  final RadarSource source;
+  final double opacity;
+
+  const RadarState({
+    this.isVisible = false,
+    this.source = RadarSource.rainviewer,
+    this.opacity = 0.7,
+  });
+
+  RadarState copyWith({
+    bool? isVisible,
+    RadarSource? source,
+    double? opacity,
+  }) {
+    return RadarState(
+      isVisible: isVisible ?? this.isVisible,
+      source: source ?? this.source,
+      opacity: opacity ?? this.opacity,
     );
-    
-    if (response.statusCode == 200) {
-      final data = jsonDecode(response.body);
-      final radar = data['radar'] as Map<String, dynamic>;
-      final past = radar['past'] as List<dynamic>;
-      
-      // Extrahiere Zeitstempel und konvertiere zu String-Liste
-      return past.map<String>((item) => item['time'].toString()).toList();
-    }
-  } catch (e) {
-    print('Fehler beim Laden der Radar-Zeitstempel: $e');
   }
-  return [];
+}
+
+class RadarNotifier extends StateNotifier<RadarState> {
+  RadarNotifier() : super(const RadarState());
+
+  void toggleVisibility() {
+    state = state.copyWith(isVisible: !state.isVisible);
+  }
+
+  void setSource(RadarSource source) {
+    state = state.copyWith(source: source);
+  }
+
+  void setOpacity(double opacity) {
+    state = state.copyWith(opacity: opacity.clamp(0.0, 1.0));
+  }
+
+  void hide() {
+    state = state.copyWith(isVisible: false);
+  }
+
+  void show() {
+    state = state.copyWith(isVisible: true);
+  }
+}
+
+final radarProvider = StateNotifierProvider<RadarNotifier, RadarState>((ref) {
+  return RadarNotifier();
 });
 
-/// Gibt das Radar-Tile-URL-Template zurück
-final radarTileProviderProvider = Provider<String>((ref) {
-  final timestamp = ref.watch(radarTimestampProvider);
-  
-  if (timestamp.isEmpty) {
-    // Lade den neuesten Zeitstempel
-    final timestampsAsync = ref.watch(radarTimestampsProvider);
-    timestampsAsync.whenData((timestamps) {
-      if (timestamps.isNotEmpty) {
-        // Verwende den neuesten Zeitstempel
-        final latestTimestamp = timestamps.last;
-        Future.microtask(() {
-          ref.read(radarTimestampProvider.notifier).state = latestTimestamp;
-        });
-      }
-    });
-    return '';
+// Hilfsfunktion für Radar-URLs
+class RadarUrlHelper {
+  static String getRadarUrl(RadarSource source, int x, int y, int z, {int? timestamp}) {
+    switch (source) {
+      case RadarSource.rainviewer:
+        final ts = timestamp ?? (DateTime.now().millisecondsSinceEpoch ~/ 1000);
+        return 'https://tilecache.rainviewer.com/v2/radar/$ts/256/$z/$x/$y/2/1_1.png';
+      
+      case RadarSource.dwd:
+        return 'https://maps.dwd.de/geoserver/dwd/wmts?'
+            'layer=RADOLAN-OS&style=default&tilematrixset=EPSG:4326&'
+            'Service=WMTS&Request=GetTile&Version=1.0.0&Format=image/png&'
+            'TileMatrix=$z&TileCol=$x&TileRow=$y';
+      
+      case RadarSource.openweathermap:
+        final apiKey = dotenv.env['OWM_API_KEY'] ?? '';
+        if (apiKey.isEmpty) {
+          print('Warning: OWM_API_KEY not found in .env file');
+          return '';
+        }
+        return 'https://tile.openweathermap.org/map/precipitation_new/$z/$x/$y.png?appid=$apiKey';
+    }
   }
-  
-  return 'https://tilecache.rainviewer.com/v2/radar/$timestamp/256/{z}/{x}/{y}/2/1_1.png';
-});
+
+  static String getSourceDisplayName(RadarSource source) {
+    switch (source) {
+      case RadarSource.rainviewer:
+        return 'RainViewer';
+      case RadarSource.dwd:
+        return 'DWD (Deutscher Wetterdienst)';
+      case RadarSource.openweathermap:
+        return 'OpenWeatherMap';
+    }
+  }
+}

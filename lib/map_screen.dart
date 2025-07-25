@@ -1,465 +1,555 @@
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:latlong2/latlong.dart';
-import 'widgets/map_widget.dart';
-import 'widgets/address_input_widget.dart';
-import 'routing_service.dart';
-import 'models/route_data.dart';
-import 'radar_provider.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 
+import 'widgets/map_widget.dart';
+import 'widgets/address_input_widget.dart';
+import 'radar_provider.dart';
+import 'routing_service.dart';
+import 'navigation_service.dart';
+import 'nominatim_service.dart';
 import 'shelter_finder.dart';
+import 'models/route_data.dart';
+import 'settings_screen.dart';
 
 class MapScreen extends ConsumerStatefulWidget {
-  final VoidCallback? onOpenSettings;
-
-  const MapScreen({super.key, this.onOpenSettings});
+  const MapScreen({super.key});
 
   @override
   ConsumerState<MapScreen> createState() => _MapScreenState();
 }
 
 class _MapScreenState extends ConsumerState<MapScreen> {
-  final _startController = TextEditingController();
-  final _endController = TextEditingController();
-  final _startAddressController = TextEditingController();
-  final _endAddressController = TextEditingController();
+  LatLng _currentCenter = const LatLng(51.1657, 10.4515); // Deutschland Zentrum
+  final double _currentZoom = 6.0;
+  
+  String _startAddress = '';
+  String _endAddress = '';
+  LatLng? _startPoint;
+  LatLng? _endPoint;
+  LatLng? _currentLocation;
+  RouteData? _currentRoute;
+  List<Shelter> _shelters = [];
+  
+  bool _isSelectingMapPoint = false;
+  bool _isSelectingStart = false;
+  bool _isLoadingRoute = false;
+  bool _showShelters = false;
 
-  RouteData _routeData = const RouteData();
-  bool _setStartMode = false;
-  bool _setEndMode = false;
-  String _profile = 'foot-walking';
-  bool _showRadar = true;
+  final RoutingService _routingService = RoutingService();
+  final NavigationService _navigationService = NavigationService();
+  final NominatimService _nominatimService = NominatimService();
 
-  void _updateRouteData(RouteData Function(RouteData) updater) {
-    setState(() => _routeData = updater(_routeData));
+  @override
+  void initState() {
+    super.initState();
+    _initializeLocation();
   }
 
-  void _setStartLocation(String coords) {
-    final parts = coords.split(',');
-    if (parts.length == 2) {
-      final lat = double.tryParse(parts[0]);
-      final lon = double.tryParse(parts[1]);
-      if (lat != null && lon != null) {
-        _updateRouteData((data) => data.copyWith(start: LatLng(lat, lon)));
-        _startController.text = coords;
+  Future<void> _initializeLocation() async {
+    try {
+      final permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        await Geolocator.requestPermission();
       }
-    }
-  }
 
-  void _setEndLocation(String coords) {
-    final parts = coords.split(',');
-    if (parts.length == 2) {
-      final lat = double.tryParse(parts[0]);
-      final lon = double.tryParse(parts[1]);
-      if (lat != null && lon != null) {
-        _updateRouteData((data) => data.copyWith(end: LatLng(lat, lon)));
-        _endController.text = coords;
-      }
-    }
-  }
+      final position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
 
-  void _onMapTap(LatLng latlng) {
-    if (_setStartMode) {
-      _setStartLocation('${latlng.latitude},${latlng.longitude}');
-      _startAddressController.text = '${latlng.latitude},${latlng.longitude}';
       setState(() {
-        _setStartMode = false;
-        _setEndMode = true;
+        _currentLocation = LatLng(position.latitude, position.longitude);
+        _currentCenter = _currentLocation!;
       });
-    } else if (_setEndMode) {
-      _setEndLocation('${latlng.latitude},${latlng.longitude}');
-      _endAddressController.text = '${latlng.latitude},${latlng.longitude}';
-      setState(() => _setEndMode = false);
+    } catch (e) {
+      print('Standort konnte nicht ermittelt werden: $e');
     }
   }
 
-  Future<void> _planRoute() async {
-    if (_routeData.start == null || _routeData.end == null) {
-      _updateRouteData((data) => data.copyWith(
-        error: 'Bitte Start und Ziel setzen',
-        isLoading: false,
-      ));
+  void _onMapTap(LatLng point) {
+    if (_isSelectingMapPoint) {
+      setState(() {
+        if (_isSelectingStart) {
+          _startPoint = point;
+          _startAddress = 'Ausgewählter Punkt';
+        } else {
+          _endPoint = point;
+          _endAddress = 'Ausgewählter Punkt';
+        }
+        _isSelectingMapPoint = false;
+      });
+    }
+  }
+
+  void _onAddressChanged(String address, LatLng? location, bool isStart) {
+    if (address == 'Punkt auf Karte wählen') {
+      setState(() {
+        _isSelectingMapPoint = true;
+        _isSelectingStart = isStart;
+      });
       return;
     }
 
-    _updateRouteData((data) => data.copyWith(
-      isLoading: true,
-      error: null,
-    ));
+    setState(() {
+      if (isStart) {
+        _startAddress = address;
+        _startPoint = location;
+      } else {
+        _endAddress = address;
+        _endPoint = location;
+      }
+    });
 
-    try {
-      final routeResult = await RoutingService.getRoute(
-        start: _routeData.start!,
-        end: _routeData.end!,
-        profile: _profile,
-      );
-      final shelters = await ShelterFinder.findSheltersNear(_routeData.end!);
-
-      _updateRouteData((data) => data.copyWith(
-        route: routeResult.coordinates,
-        shelters: shelters,
-        distanceInMeters: routeResult.distanceInMeters,
-        durationInSeconds: routeResult.durationInSeconds,
-        isLoading: false,
-      ));
-    } catch (e) {
-      _updateRouteData((data) => data.copyWith(
-        error: e.toString(),
-        isLoading: false,
-      ));
+    // Geocoding falls keine Koordinaten vorhanden
+    if (location == null && address.isNotEmpty && address != 'Aktueller Standort') {
+      _geocodeAddress(address, isStart);
     }
   }
 
-  Future<void> _setCurrentLocationAsStart() async {
-    _updateRouteData((data) => data.copyWith(isLoading: true));
+  Future<void> _geocodeAddress(String address, bool isStart) async {
+    try {
+      final results = await _nominatimService.searchAddresses(address);
+      if (results.isNotEmpty) {
+        final result = results.first;
+        setState(() {
+          if (isStart) {
+            _startPoint = result.location;
+            _startAddress = result.shortName;
+          } else {
+            _endPoint = result.location;
+            _endAddress = result.shortName;
+          }
+        });
+      }
+    } catch (e) {
+      print('Geocoding Fehler: $e');
+    }
+  }
+
+  Future<void> _calculateRoute() async {
+    if (_startPoint == null || _endPoint == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Bitte Start- und Endpunkt auswählen')),
+      );
+      return;
+    }
+
+    setState(() {
+      _isLoadingRoute = true;
+    });
 
     try {
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-        if (permission == LocationPermission.denied) {
-          throw Exception('Standortberechtigung verweigert.');
-        }
-      }
-
-      final pos = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
+      final route = await _routingService.calculateRoute(
+        _startPoint!,
+        _endPoint!,
+        startAddress: _startAddress,
+        endAddress: _endAddress,
       );
-      final latlng = LatLng(pos.latitude, pos.longitude);
 
-      _updateRouteData((data) => data.copyWith(
-        start: latlng,
-        isLoading: false,
-      ));
-      _startController.text = '${latlng.latitude},${latlng.longitude}';
-      _startAddressController.text = 'Mein Standort';
+      if (route != null) {
+        setState(() {
+          _currentRoute = route;
+        });
+      } else {
+        // Fallback: Luftlinie
+        final fallbackRoute = _routingService.createStraightLineRoute(
+          _startPoint!,
+          _endPoint!,
+          _startAddress,
+          _endAddress,
+        );
+        setState(() {
+          _currentRoute = fallbackRoute;
+        });
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Route als Luftlinie berechnet (kein Routing Service verfügbar)')),
+        );
+      }
     } catch (e) {
-      _updateRouteData((data) => data.copyWith(
-        error: e.toString(),
-        isLoading: false,
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Fehler bei Routenberechnung: $e')),
+      );
+    } finally {
+      setState(() {
+        _isLoadingRoute = false;
+      });
     }
+  }
+
+  Future<void> _startNavigation() async {
+    if (_currentRoute == null) return;
+
+    await _navigationService.startNavigation(_currentRoute!);
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Navigation gestartet - Sie erhalten Benachrichtigungen bei Regen'),
+        backgroundColor: Colors.green,
+      ),
+    );
+  }
+
+  void _stopNavigation() {
+    _navigationService.stopNavigation();
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Navigation beendet')),
+    );
+  }
+
+  Future<void> _findShelters() async {
+    if (_currentLocation == null) return;
+
+    try {
+      final shelters = await ShelterFinder.findNearbyShelters(_currentLocation!);
+      setState(() {
+        _shelters = shelters;
+        _showShelters = true;
+      });
+    } catch (e) {
+      print('Fehler beim Laden der Unterstände: $e');
+    }
+  }
+
+  List<Marker> _buildMarkers() {
+    final markers = <Marker>[];
+
+    // Start Marker
+    if (_startPoint != null) {
+      markers.add(
+        Marker(
+          point: _startPoint!,
+          width: 40,
+          height: 40,
+          child: const Icon(
+            Icons.play_arrow,
+            color: Colors.green,
+            size: 40,
+          ),
+        ),
+      );
+    }
+
+    // End Marker
+    if (_endPoint != null) {
+      markers.add(
+        Marker(
+          point: _endPoint!,
+          width: 40,
+          height: 40,
+          child: const Icon(
+            Icons.stop,
+            color: Colors.red,
+            size: 40,
+          ),
+        ),
+      );
+    }
+
+    // Shelter Markers
+    if (_showShelters) {
+      for (final shelter in _shelters) {
+        markers.add(
+          Marker(
+            point: shelter.location,
+            width: 30,
+            height: 30,
+            child: Tooltip(
+              message: shelter.displayName,
+              child: const Icon(
+                Icons.umbrella,
+                color: Colors.orange,
+                size: 30,
+              ),
+            ),
+          ),
+        );
+      }
+    }
+
+    return markers;
+  }
+
+  List<Polyline> _buildPolylines() {
+    if (_currentRoute == null) return [];
+
+    return [
+      Polyline(
+        points: _currentRoute!.polylinePoints,
+        color: Colors.blue,
+        strokeWidth: 4.0,
+      ),
+    ];
+  }
+
+  Widget _buildRadarControls() {
+    final radarState = ref.watch(radarProvider);
+
+    return Positioned(
+      top: 100,
+      right: 16,
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(8),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.2),
+              blurRadius: 4,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: PopupMenuButton<String>(
+          icon: Icon(
+            Icons.layers,
+            color: radarState.isVisible ? Colors.blue : Colors.grey,
+          ),
+          tooltip: 'Radar Optionen',
+          itemBuilder: (context) => [
+            PopupMenuItem(
+              value: 'toggle',
+              child: Row(
+                children: [
+                  Icon(radarState.isVisible ? Icons.visibility_off : Icons.visibility),
+                  const SizedBox(width: 8),
+                  Text(radarState.isVisible ? 'Radar ausblenden' : 'Radar anzeigen'),
+                ],
+              ),
+            ),
+            const PopupMenuDivider(),
+            PopupMenuItem(
+              value: 'rainviewer',
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.radio_button_checked,
+                    color: radarState.source == RadarSource.rainviewer ? Colors.blue : Colors.grey,
+                  ),
+                  const SizedBox(width: 8),
+                  const Text('RainViewer'),
+                ],
+              ),
+            ),
+            PopupMenuItem(
+              value: 'dwd',
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.radio_button_checked,
+                    color: radarState.source == RadarSource.dwd ? Colors.blue : Colors.grey,
+                  ),
+                  const SizedBox(width: 8),
+                  const Text('DWD'),
+                ],
+              ),
+            ),
+            PopupMenuItem(
+              value: 'openweathermap',
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.radio_button_checked,
+                    color: radarState.source == RadarSource.openweathermap ? Colors.blue : Colors.grey,
+                  ),
+                  const SizedBox(width: 8),
+                  const Text('OpenWeatherMap'),
+                ],
+              ),
+            ),
+            const PopupMenuDivider(),
+            PopupMenuItem(
+              value: 'shelters',
+              child: Row(
+                children: [
+                  Icon(_showShelters ? Icons.umbrella : Icons.umbrella_outlined),
+                  const SizedBox(width: 8),
+                  Text(_showShelters ? 'Unterstände ausblenden' : 'Unterstände anzeigen'),
+                ],
+              ),
+            ),
+          ],
+          onSelected: (value) {
+            switch (value) {
+              case 'toggle':
+                ref.read(radarProvider.notifier).toggleVisibility();
+                break;
+              case 'rainviewer':
+                ref.read(radarProvider.notifier).setSource(RadarSource.rainviewer);
+                if (!radarState.isVisible) {
+                  ref.read(radarProvider.notifier).show();
+                }
+                break;
+              case 'dwd':
+                ref.read(radarProvider.notifier).setSource(RadarSource.dwd);
+                if (!radarState.isVisible) {
+                  ref.read(radarProvider.notifier).show();
+                }
+                break;
+              case 'openweathermap':
+                ref.read(radarProvider.notifier).setSource(RadarSource.openweathermap);
+                if (!radarState.isVisible) {
+                  ref.read(radarProvider.notifier).show();
+                }
+                break;
+              case 'shelters':
+                if (_showShelters) {
+                  setState(() {
+                    _showShelters = false;
+                    _shelters.clear();
+                  });
+                } else {
+                  _findShelters();
+                }
+                break;
+            }
+          },
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final mapCenter = _routeData.route.isNotEmpty 
-        ? _routeData.route.first 
-        : const LatLng(52.5200, 13.4050);
-    final radarVisible = ref.watch(radarOverlayProvider);
+    final isNavigating = _navigationService.isNavigating;
 
     return Scaffold(
-      body: SafeArea(
-        child: Column(
-          children: [
-            // Header Card
-            Container(
-              padding: const EdgeInsets.all(20),
-              child: Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Text(
-                            'DryRoute',
-                            style: Theme.of(context).textTheme.headlineMedium,
-                          ),
-                          const Spacer(),
-                          // Transport Mode Toggle
-                          Container(
-                            decoration: BoxDecoration(
-                              color: Theme.of(context).colorScheme.primary.withOpacity(0.1),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                _buildModeButton(
-                                  Icons.directions_walk,
-                                  'foot-walking',
-                                  'Zu Fuß',
-                                ),
-                                _buildModeButton(
-                                  Icons.directions_bike,
-                                  'cycling-regular',
-                                  'Rad',
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 24),
-
-                      // Address Inputs
-                      AddressInputWidget(
-                        label: 'Von',
-                        controller: _startAddressController,
-                        onAddressSelected: _setStartLocation,
-                        onSetLocationMode: () => setState(() {
-                          _setStartMode = true;
-                          _setEndMode = false;
-                        }),
-                        hasLocation: _routeData.start != null,
-                        onCurrentLocation: _setCurrentLocationAsStart,
-                      ),
-                      const SizedBox(height: 16),
-                      AddressInputWidget(
-                        label: 'Nach',
-                        controller: _endAddressController,
-                        onAddressSelected: _setEndLocation,
-                        onSetLocationMode: () => setState(() {
-                          _setEndMode = true;
-                          _setStartMode = false;
-                        }),
-                        hasLocation: _routeData.end != null,
-                      ),
-                      const SizedBox(height: 24),
-
-                      // Route Button & Radar Toggle
-                      Row(
-                        children: [
-                          Expanded(
-                            child: ElevatedButton(
-                              onPressed: _routeData.isLoading ? null : _planRoute,
-                              child: _routeData.isLoading
-                                  ? const SizedBox(
-                                      width: 20,
-                                      height: 20,
-                                      child: CircularProgressIndicator(strokeWidth: 2),
-                                    )
-                                  : const Text('Route planen'),
-                            ),
-                          ),
-                          const SizedBox(width: 16),
-                          _buildRadarToggle(),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-
-            // Error Display
-            if (_routeData.error != null)
-              Container(
-                margin: const EdgeInsets.symmetric(horizontal: 20),
-                child: Card(
-                  color: Theme.of(context).colorScheme.secondary.withOpacity(0.1),
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.warning_amber_rounded,
-                          color: Theme.of(context).colorScheme.secondary,
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            _routeData.error!,
-                            style: TextStyle(
-                              color: Theme.of(context).colorScheme.secondary,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-
-            // Map
-            Expanded(
-              child: Container(
-                margin: const EdgeInsets.all(20),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(16),
-                  child: MapWidget(
-                    center: mapCenter,
-                    route: _routeData.route,
-                    shelters: _routeData.shelters,
-                    start: _routeData.start,
-                    end: _routeData.end,
-                    onTap: _onMapTap,
-                    showRadar: _showRadar,
-                  ),
-                ),
-              ),
-            ),
-
-            // Bottom Info Card
-            if (_routeData.route.isNotEmpty || _routeData.isLoading)
-              Container(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-                child: Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(20),
-                    child: _routeData.isLoading
-                        ? Row(
-                            children: [
-                              const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(strokeWidth: 2),
-                              ),
-                              const SizedBox(width: 12),
-                              Text(
-                                'Route wird berechnet...',
-                                style: Theme.of(context).textTheme.bodyMedium,
-                              ),
-                            ],
-                          )
-                        : Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Row(
-                                children: [
-                                  Text(
-                                    '${((_routeData.distanceInMeters ?? 0) / 1000).toStringAsFixed(1)} km',
-                                    style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                                      color: Theme.of(context).colorScheme.primary,
-                                    ),
-                                  ),
-                                  const Spacer(),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                                    decoration: BoxDecoration(
-                                      color: _routeData.shelters.isNotEmpty 
-                                          ? Colors.green.withOpacity(0.1)
-                                          : Colors.orange.withOpacity(0.1),
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(
-                                          Icons.house,
-                                          size: 16,
-                                          color: _routeData.shelters.isNotEmpty 
-                                              ? Colors.green 
-                                              : Colors.orange,
-                                        ),
-                                        const SizedBox(width: 4),
-                                        Text(
-                                          '${_routeData.shelters.length} Unterstände',
-                                          style: TextStyle(
-                                            color: _routeData.shelters.isNotEmpty 
-                                                ? Colors.green 
-                                                : Colors.orange,
-                                            fontWeight: FontWeight.w500,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                'Geschätzte Dauer: ${((_routeData.durationInSeconds ?? 0) / 60).round()} Min',
-                                style: Theme.of(context).textTheme.bodyMedium,
-                              ),
-                            ],
-                          ),
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-    appBar: AppBar(
+      appBar: AppBar(
         title: const Text('DryRoute'),
-        backgroundColor: Theme.of(context).colorScheme.primary,
-        foregroundColor: Colors.white,
         actions: [
           IconButton(
-            icon: Icon(radarVisible ? Icons.radar : Icons.radar_outlined),
             onPressed: () {
-              ref.read(radarOverlayProvider.notifier).state = !radarVisible;
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const SettingsScreen()),
+              );
             },
-            tooltip: radarVisible ? 'Radar ausblenden' : 'Radar einblenden',
+            icon: const Icon(Icons.settings),
           ),
         ],
       ),
-    );
-  }
-
-  Widget _buildModeButton(IconData icon, String mode, String label) {
-    final isSelected = _profile == mode;
-    return GestureDetector(
-      onTap: () => setState(() => _profile = mode),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        decoration: BoxDecoration(
-          color: isSelected 
-              ? Theme.of(context).colorScheme.primary 
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              icon,
-              size: 20,
-              color: isSelected 
-                  ? Colors.white 
-                  : Theme.of(context).colorScheme.primary,
-            ),
-            const SizedBox(width: 8),
-            Text(
-              label,
-              style: TextStyle(
-                color: isSelected 
-                    ? Colors.white 
-                    : Theme.of(context).colorScheme.primary,
-                fontWeight: FontWeight.w500,
+      body: Stack(
+        children: [
+          MapWidget(
+            center: _currentCenter,
+            zoom: _currentZoom,
+            markers: _buildMarkers(),
+            polylines: _buildPolylines(),
+            onTap: _onMapTap,
+            showCurrentLocation: true,
+            currentLocation: _currentLocation,
+            isNavigationMode: isNavigating,
+          ),
+          _buildRadarControls(),
+          if (_isSelectingMapPoint)
+            Positioned(
+              top: 100,
+              left: 16,
+              right: 16,
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.orange,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  _isSelectingStart 
+                      ? 'Startpunkt auf der Karte auswählen'
+                      : 'Zielpunkt auf der Karte auswählen',
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                  textAlign: TextAlign.center,
+                ),
               ),
             ),
+        ],
+      ),
+      bottomSheet: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black26,
+              blurRadius: 8,
+              offset: Offset(0, -2),
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!isNavigating) ...[
+              AddressInputWidget(
+                label: 'Start',
+                value: _startAddress,
+                onChanged: (address, location) => _onAddressChanged(address, location, true),
+                isStart: true,
+              ),
+              const SizedBox(height: 16),
+              AddressInputWidget(
+                label: 'Ziel',
+                value: _endAddress,
+                onChanged: (address, location) => _onAddressChanged(address, location, false),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: _isLoadingRoute ? null : _calculateRoute,
+                      child: _isLoadingRoute
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text('Route berechnen'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    onPressed: _currentRoute == null ? null : _startNavigation,
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                    child: const Text('Navigation starten'),
+                  ),
+                ],
+              ),
+              if (_currentRoute != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  '${_currentRoute!.formattedDistance} • ${_currentRoute!.formattedDuration}',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ],
+            ] else ...[
+              Text(
+                'Navigation aktiv',
+                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                  color: Colors.green,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              if (_currentRoute != null)
+                Text(
+                  '${_currentRoute!.formattedDistance} • ${_currentRoute!.formattedDuration}',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: _stopNavigation,
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                child: const Text('Navigation beenden'),
+              ),
+            ],
           ],
         ),
       ),
     );
-  }
-
-  Widget _buildRadarToggle() {
-    return GestureDetector(
-      onTap: () => setState(() => _showRadar = !_showRadar),
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: _showRadar 
-              ? Theme.of(context).colorScheme.primary 
-              : Theme.of(context).colorScheme.surface,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: Theme.of(context).colorScheme.primary.withOpacity(0.3),
-          ),
-        ),
-        child: Icon(
-          Icons.radar,
-          color: _showRadar 
-              ? Colors.white 
-              : Theme.of(context).colorScheme.primary,
-        ),
-      ),
-    );
-  }
-
-  @override
-  void dispose() {
-    _startController.dispose();
-    _endController.dispose();
-    _startAddressController.dispose();
-    _endAddressController.dispose();
-    super.dispose();
   }
 }

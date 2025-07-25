@@ -1,206 +1,222 @@
-
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:latlong2/latlong.dart';
 import '../radar_provider.dart';
+import '../radar_tile_provider.dart';
 
 class MapWidget extends ConsumerStatefulWidget {
   final LatLng center;
-  final List<LatLng> route;
-  final List<LatLng> shelters;
-  final LatLng? start;
-  final LatLng? end;
-  final Function(LatLng) onTap;
-  final bool showRadar;
+  final double zoom;
+  final List<Marker> markers;
+  final List<Polyline> polylines;
+  final Function(LatLng)? onTap;
+  final bool showCurrentLocation;
+  final LatLng? currentLocation;
+  final bool isNavigationMode;
 
   const MapWidget({
     super.key,
     required this.center,
-    required this.route,
-    required this.shelters,
-    this.start,
-    this.end,
-    required this.onTap,
-    this.showRadar = true,
+    this.zoom = 13.0,
+    this.markers = const [],
+    this.polylines = const [],
+    this.onTap,
+    this.showCurrentLocation = false,
+    this.currentLocation,
+    this.isNavigationMode = false,
   });
 
   @override
   ConsumerState<MapWidget> createState() => _MapWidgetState();
 }
 
-class _MapWidgetState extends ConsumerState<MapWidget> {
+class _MapWidgetState extends ConsumerState<MapWidget> with TickerProviderStateMixin {
   final MapController _mapController = MapController();
-  List<LatLng> _previousRoute = [];
+  bool _isCompassLocked = false;
+  double _currentRotation = 0.0;
+  late AnimationController _rotationController;
 
   @override
-  void didUpdateWidget(MapWidget oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    
-    // Wenn eine neue Route berechnet wurde, zoome darauf
-    if (widget.route.isNotEmpty && 
-        widget.route != _previousRoute && 
-        widget.route.length > 1) {
-      _previousRoute = widget.route;
-      // Längeres Delay für stabilere Kamera-Updates
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        Future.delayed(const Duration(milliseconds: 300), () {
-          if (mounted) {
-            _fitBounds();
-          }
-        });
-      });
-    }
+  void initState() {
+    super.initState();
+    _rotationController = AnimationController(
+      duration: const Duration(milliseconds: 300),
+      vsync: this,
+    );
   }
 
-  void _fitBounds() {
-    if (widget.route.isEmpty) return;
+  @override
+  void dispose() {
+    _rotationController.dispose();
+    super.dispose();
+  }
 
-    // Berechne die Bounding Box der Route
-    double minLat = widget.route.first.latitude;
-    double maxLat = widget.route.first.latitude;
-    double minLng = widget.route.first.longitude;
-    double maxLng = widget.route.first.longitude;
+  void _toggleCompassLock() {
+    setState(() {
+      _isCompassLocked = !_isCompassLocked;
+      if (!_isCompassLocked) {
+        // Reset rotation to north
+        _currentRotation = 0.0;
+        _rotationController.forward();
+      }
+    });
+  }
 
-    for (final point in widget.route) {
-      minLat = minLat < point.latitude ? minLat : point.latitude;
-      maxLat = maxLat > point.latitude ? maxLat : point.latitude;
-      minLng = minLng < point.longitude ? minLng : point.longitude;
-      maxLng = maxLng > point.longitude ? maxLng : point.longitude;
-    }
+  void _resetRotation() {
+    _mapController.rotate(0.0);
+    setState(() {
+      _currentRotation = 0.0;
+    });
+  }
 
-    // Füge etwas Padding hinzu
-    final latPadding = (maxLat - minLat) * 0.1;
-    final lngPadding = (maxLng - minLng) * 0.1;
+  List<Widget> _buildRadarLayers() {
+    final radarState = ref.watch(radarProvider);
+    
+    if (!radarState.isVisible) return [];
 
-    final bounds = LatLngBounds(
-      LatLng(minLat - latPadding, minLng - lngPadding),
-      LatLng(maxLat + latPadding, maxLng + lngPadding),
+    return [
+      TileLayer(
+        urlTemplate: RadarUrlHelper.getRadarUrl(
+          radarState.source,
+          0, 0, 0, // Placeholder values, will be replaced by flutter_map
+        ).replaceAll('256/0/0/0', '256/{z}/{x}/{y}'),
+        tileProvider: CachedRadarTileProvider(source: radarState.source),
+        // Optimierungen für bessere Performance
+        maxZoom: 18,
+        keepBuffer: 2,
+        panBuffer: 1,
+        tileSize: 256,
+        retinaMode: true,
+      ),
+    ];
+  }
+
+  Widget _buildCompassWidget() {
+    return Positioned(
+      top: widget.isNavigationMode ? 60 : 100,
+      right: 16,
+      child: Column(
+        children: [
+          // Kompass-Button
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.2),
+                  blurRadius: 4,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: IconButton(
+              onPressed: _toggleCompassLock,
+              icon: Icon(
+                _isCompassLocked ? Icons.explore : Icons.explore_off,
+                color: _isCompassLocked ? Colors.blue : Colors.grey,
+              ),
+              tooltip: _isCompassLocked ? 'Kompass entsperren' : 'Nach Norden ausrichten',
+            ),
+          ),
+          const SizedBox(height: 8),
+          // Reset-Button (nur wenn Rotation vorhanden)
+          if (_currentRotation != 0.0)
+            Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(8),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.2),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: IconButton(
+                onPressed: _resetRotation,
+                icon: const Icon(Icons.navigation, color: Colors.blue),
+                tooltip: 'Nach Norden ausrichten',
+              ),
+            ),
+        ],
+      ),
     );
-
-    // Verwende fitCamera mit forceIntegerZoomLevel: false für smoothere Übergänge
-    try {
-      _mapController.fitCamera(
-        CameraFit.bounds(
-          bounds: bounds,
-          padding: const EdgeInsets.all(50),
-          forceIntegerZoomLevel: false,
-        ),
-      );
-    } catch (e) {
-      // Fallback: Einfacher Move zur Mitte der Route
-      final center = LatLng(
-        (minLat + maxLat) / 2,
-        (minLng + maxLng) / 2,
-      );
-      _mapController.move(center, 13.0);
-    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final radarTileUrl = ref.watch(radarTileProviderProvider);
-    final showRadarOverlay = ref.watch(radarOverlayProvider) && widget.showRadar;
-
-    final markers = <Marker>[
-      if (widget.start != null)
+    final markers = List<Marker>.from(widget.markers);
+    
+    // Aktueller Standort Marker hinzufügen
+    if (widget.showCurrentLocation && widget.currentLocation != null) {
+      markers.add(
         Marker(
-          point: widget.start!,
-          width: 40,
-          height: 40,
+          point: widget.currentLocation!,
+          width: 20,
+          height: 20,
           child: Container(
             decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.primary,
+              color: Colors.blue,
               shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.3),
-                  blurRadius: 4,
-                  offset: const Offset(0, 2),
-                ),
-              ],
+              border: Border.all(color: Colors.white, width: 2),
             ),
-            child: const Icon(Icons.location_on, color: Colors.white, size: 24),
           ),
         ),
-      if (widget.end != null)
-        Marker(
-          point: widget.end!,
-          width: 40,
-          height: 40,
-          child: Container(
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.secondary,
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.3),
-                  blurRadius: 4,
-                  offset: const Offset(0, 2),
-                ),
-              ],
-            ),
-            child: const Icon(Icons.flag, color: Colors.white, size: 24),
-          ),
-        ),
-      ...widget.shelters.map((shelter) => Marker(
-        point: shelter,
-        width: 32,
-        height: 32,
-        child: Container(
-          decoration: BoxDecoration(
-            color: Colors.green,
-            shape: BoxShape.circle,
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.3),
-                blurRadius: 4,
-                offset: const Offset(0, 2),
-              ),
-            ],
-          ),
-          child: const Icon(Icons.house, color: Colors.white, size: 18),
-        ),
-      )),
-    ];
+      );
+    }
 
     return FlutterMap(
       mapController: _mapController,
       options: MapOptions(
         initialCenter: widget.center,
-        initialZoom: widget.route.isEmpty ? 5.5 : 13.0, // Zoom 5.5 für ganz Deutschland, 13 für lokale Ansicht
-        onTap: (tapPos, latlng) => widget.onTap(latlng),
-        onLongPress: (tapPos, latlng) => widget.onTap(latlng),
+        initialZoom: widget.zoom,
+        minZoom: 3,
+        maxZoom: 18,
+        onTap: (tapPosition, point) {
+          widget.onTap?.call(point);
+        },
+        onPositionChanged: (position, hasGesture) {
+          // Position change handling could be added here
+        },
+        // Performance Optimierungen
+        interactionOptions: const InteractionOptions(
+          enableScrollWheel: true,
+          scrollWheelVelocity: 0.005,
+        ),
       ),
       children: [
+        // Base Map Layer
         TileLayer(
-          urlTemplate: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-          subdomains: const ['a', 'b', 'c'],
-          userAgentPackageName: 'de.dryroute.app',
+          urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+          userAgentPackageName: 'com.example.dryroute',
+          maxZoom: 19,
+          // Performance Optimierungen
+          keepBuffer: 3,
+          panBuffer: 2,
+          tileSize: 256,
+          retinaMode: MediaQuery.of(context).devicePixelRatio > 1.5,
         ),
-        if (showRadarOverlay && radarTileUrl.isNotEmpty)
-          Opacity(
-            opacity: 0.7,
-            child: TileLayer(
-              urlTemplate: radarTileUrl,
-              backgroundColor: Colors.transparent,
-              additionalOptions: const {
-                'attribution': 'RainViewer',
-              },
-            ),
-          ),
-        if (markers.isNotEmpty)
-          MarkerLayer(markers: markers),
-        if (widget.route.isNotEmpty)
+        
+        // Radar Layers
+        ..._buildRadarLayers(),
+        
+        // Polylines (Routen)
+        if (widget.polylines.isNotEmpty)
           PolylineLayer(
-            polylines: [
-              Polyline(
-                points: widget.route,
-                color: Theme.of(context).colorScheme.primary,
-                strokeWidth: 4,
-              )
-            ],
+            polylines: widget.polylines,
           ),
+        
+        // Markers
+        if (markers.isNotEmpty)
+          MarkerLayer(
+            markers: markers,
+          ),
+        
+        // Compass Widget
+        _buildCompassWidget(),
       ],
     );
   }
